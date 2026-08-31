@@ -304,7 +304,9 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
 
             # 扫描下拉菜单，定位排在「搜索网络结果」下方、放大镜旁边的第 1 个精准关键词条目
             m_rect = get_window_rect(main_hwnd)
-            dropdown_bbox = (m_rect[0], m_rect[1], m_rect[0] + 500, m_rect[1] + 500)
+            dropdown_w = max(500, int((m_rect[2] - m_rect[0]) * 0.45))
+            dropdown_h = max(500, int((m_rect[3] - m_rect[1]) * 0.55))
+            dropdown_bbox = (m_rect[0], m_rect[1], m_rect[0] + dropdown_w, m_rect[1] + dropdown_h)
             items, _ = ocr_region(dropdown_bbox)
 
             header_bottom = m_rect[1] + 130
@@ -337,31 +339,30 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
                 browser_hwnd = get_wechat_browser_hwnd()
                 if browser_hwnd:
                     break
-                time.sleep(0.5)
+                time.sleep(0.3)
 
             if browser_hwnd:
                 activate_hwnd(browser_hwnd)
-                time.sleep(0.5)
+                time.sleep(0.3)
 
             logger.info("步骤 3: 在搜索结果中定位「%s」服务号/公众号卡片...", keyword)
             pos = find_account_card_in_search(keyword, hwnd=browser_hwnd)
 
             logger.info("点击进入第 1 个公众号主页: %s...", pos)
             pyautogui.click(pos[0], pos[1])
-            time.sleep(3.0)
 
-            # 等待并激活新打开的公众号主页窗口
-            h_deadline = time.time() + 5.0
+            # 事件驱动轮询等待并激活新打开的公众号主页窗口 (最长 6 秒)
+            h_deadline = time.time() + 6.0
             home_hwnd = None
             while time.time() < h_deadline:
                 home_hwnd = get_wechat_browser_hwnd(title_keyword=account_name)
                 if home_hwnd:
                     break
-                time.sleep(0.5)
+                time.sleep(0.3)
 
             if home_hwnd:
                 activate_hwnd(home_hwnd)
-                time.sleep(0.5)
+                time.sleep(0.4)
 
             logger.info("成功进入公众号主页。")
             return

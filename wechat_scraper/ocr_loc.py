@@ -135,6 +135,9 @@ def find_account_card_in_search(
     import time
     deadline = time.time() + timeout
 
+    if not hwnd:
+        hwnd = get_wechat_browser_hwnd()
+
     while time.time() < deadline:
         if hwnd:
             bbox = get_window_rect(hwnd)
