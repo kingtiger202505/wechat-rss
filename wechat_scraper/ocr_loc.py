@@ -257,20 +257,19 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
     def _is_in_existing_band(cy: int, threshold: int = 40) -> bool:
         return any(abs(cy - y) < threshold for y in seen_y_bands)
 
-    # 2. 策略 A: 互动数据与日期锚点关联法 (微信文章卡片下方均有「阅读/赞」或日期)
+    # 2. 策略 A: 互动数据锚点关联法 (微信文章卡片底部均标配「阅读/赞/在看」)
     anchors = [
         it for it in items 
         if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享", "次阅读"])
     ]
-    # 补充日期类锚点 (针对无阅读数标识的文章卡片)
-    date_anchors = [
-        it for it in items
-        if it["top"] > tab_bottom and (any(it["text"].endswith(d) for d in ["日", "月", "年"]) or any(w in it["text"] for w in ["昨天", "前天"]))
-        and not _is_in_existing_band(it["cy"], threshold=30)
-    ]
-    all_anchors = anchors + date_anchors
+    # 仅在全屏无任何「阅读」标注时，才退化使用日期作为候选锚点
+    if not anchors:
+        anchors = [
+            it for it in items
+            if it["top"] > tab_bottom and (any(it["text"].endswith(d) for d in ["日", "月", "年"]) or any(w in it["text"] for w in ["昨天", "前天"]))
+        ]
 
-    for anchor in all_anchors:
+    for anchor in anchors:
         anchor_top = anchor["top"]
         title_candidates = []
         for it in items:
@@ -278,9 +277,13 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
                 continue
             if it["top"] >= tab_bottom and it["bottom"] <= anchor_top + 15:
                 dist = anchor_top - it["bottom"]
-                if -5 <= dist <= 130:
+                if -5 <= dist <= 140:
                     txt = it["text"].strip()
-                    if len(txt) >= 2 and not any(w in txt for w in exclude_words):
+                    if (
+                        len(txt) >= 2 
+                        and not any(w in txt for w in exclude_words)
+                        and not (any(txt.endswith(d) for d in ["日", "月", "年"]) and len(txt) <= 8)
+                    ):
                         title_candidates.append((dist, it))
 
         if title_candidates:
@@ -312,14 +315,22 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
 
 
 def find_fold_buttons(hwnd: Optional[int] = None) -> List[Tuple[int, int]]:
-    """识别当前公众号主页内的折叠展开按钮 (包括「余下 X 篇」、「X 个内容」、「展开」等)。"""
+    """识别当前公众号主页文章列表内的折叠展开按钮 (包括「余下 X 篇」、「X 个内容」等，严格排除主页介绍区的展开)。"""
     if hwnd is None:
         hwnd = get_wechat_browser_hwnd()
     bbox = get_window_rect(hwnd) if hwnd else None
 
     items, _ = ocr_region(bbox)
+    
+    # 动态定位 Tab 栏，折叠按钮只存在于 Tab 栏下方
+    tab_item = next((it for it in items if any(w in it["text"] for w in ["全部", "贴图", "文章", "视频号"])), None)
+    tab_bottom = (tab_item["bottom"] + 20) if tab_item else ((bbox[1] + 350) if bbox else 350)
+
     buttons = []
     for it in items:
+        # 必须在 Tab 栏下方，杜绝企业简介里的展开链接
+        if it["top"] < tab_bottom:
+            continue
         txt = it["text"].replace(" ", "")
         if (
             ("余下" in txt and any(w in txt for w in ["篇", "条", "内容"]))
