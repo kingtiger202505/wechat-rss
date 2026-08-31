@@ -31,14 +31,26 @@ def ocr_region(
     engine = get_ocr_engine()
 
     if bbox:
+        l, t, r, b = bbox
+        if r - l < 20 or b - t < 20:
+            bbox = None
+
+    if bbox:
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
         offset_x, offset_y = bbox[0], bbox[1]
     else:
         img = ImageGrab.grab(all_screens=True)
         offset_x, offset_y = 0, 0
 
+    if img.width < 20 or img.height < 20:
+        return [], img
+
     img_np = np.array(img)
-    ocr_results, _ = engine(img_np)
+    try:
+        ocr_results, _ = engine(img_np)
+    except Exception as exc:
+        logger.debug("OCR 引擎执行异常: %s", exc)
+        ocr_results = None
 
     items = []
     if ocr_results:
