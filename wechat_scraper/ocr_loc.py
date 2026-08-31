@@ -175,6 +175,9 @@ def find_account_card_in_search(
         badge_candidates = []
         account_matched = []
 
+        # 问答与搜索推荐词黑名单 (坚决防止把问答卡片/大家都在搜误判为公众号)
+        qa_exclude = ["是什么", "怎么样", "怎么", "如何", "哪家", "问答", "贴现", "百科", "招聘", "官网", "小程序", "相关搜索", "大家都在搜", "?", "？"]
+
         for it in items:
             # 排除顶部搜索框与导航栏
             if it["top"] < content_min_top:
@@ -183,16 +186,19 @@ def find_account_card_in_search(
             if it["cx"] > left_column_max_x:
                 continue
 
-            text = it["text"]
+            text = it["text"].strip()
             # 优先寻找包含「服务号」或「订阅号」或「公众号」的小徽标 (严格排除小程序)
             if any(b in text for b in ["服务号", "订阅号", "公众号"]):
                 if "小程序" not in text:
                     badge_candidates.append(it)
 
-            # 匹配包含账号关键词的卡片标题
+            # 匹配公众号名称：优先精准匹配，严格排除问答句式
             if account_name in text:
-                if not any(sub in text for sub in ["相关搜索", "招聘", "小程序", "官网"]):
-                    account_matched.append(it)
+                if not any(sub in text for sub in qa_exclude):
+                    # 计算与账号名的匹配度 (完全一致或前缀一致优先)
+                    is_exact = text == account_name
+                    is_prefix = text.startswith(account_name) and len(text) <= len(account_name) + 4
+                    account_matched.append((is_exact, is_prefix, it))
 
         # 策略 1: 优先点击包含「服务号」/「订阅号」徽标的卡片
         if badge_candidates:
@@ -200,14 +206,15 @@ def find_account_card_in_search(
             logger.info("定位到「%s」服务号/订阅号卡片: (%d, %d)", account_name, first_badge["cx"], first_badge["cy"])
             return (first_badge["cx"], first_badge["cy"])
 
-        # 策略 2: 在左侧主栏点击最靠前的账号匹配标题
+        # 策略 2: 精准匹配账号名称 (完全一致 > 前缀短词 > 最上方)
         if account_matched:
-            first_match = min(account_matched, key=lambda x: x["top"])
-            logger.info("定位到「%s」关键词卡片: (%d, %d)", account_name, first_match["cx"], first_match["cy"])
-            return (first_match["cx"], first_match["cy"])
+            account_matched.sort(key=lambda x: (not x[0], not x[1], x[2]["top"]))
+            best_match = account_matched[0][2]
+            logger.info("精准定位到「%s」账号卡片: %s (%d, %d)", account_name, best_match["text"], best_match["cx"], best_match["cy"])
+            return (best_match["cx"], best_match["cy"])
 
         # 若已有内容加载出来，只是还未匹配到徽标，短暂等待后继续检测
-        time.sleep(0.6)
+        time.sleep(0.5)
 
     # 超时后最终检查：若依然完全没有任何内容项，判定为渲染挂死
     if hwnd:
@@ -269,7 +276,7 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
     # 状态与统计词黑名单 (包含即排除)
     sub_exclude = [
         "篇原创", "朋友关注", "朋友看过", "个内容", "篇内容", "条内容", "相关搜索", "余下",
-        "微信公众平台", "公众号", "小程序"
+        "微信公众平台", "公众号", "小程序", "大家都在搜"
     ]
 
     def _is_valid_title(txt: str) -> bool:
@@ -280,6 +287,10 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
             return False
         if any(sub in t for sub in sub_exclude):
             return False
+        # 排除典型搜索联想问答句式 (如 "xx是什么平台", "xx怎么贴现")
+        if (t.endswith("?") or t.endswith("？") or any(q in t for q in ["是什么", "怎么", "如何"])) and len(t) < 16:
+            if not any(k in t for k in ["发布", "通知", "服务", "发展", "应用", "年", "月", "日"]):
+                return False
         # 纯日期与时间过滤 (如 "08/18", "14:48", "2026-08-31")
         if (any(t.endswith(d) for d in ["日", "月", "年"]) or "/" in t or ":" in t) and len(t) <= 10:
             if not any(ch in t for ch in ["涨", "第", "大会", "峰会", "链", "融", "通", "数", "重磅", "万向"]):
