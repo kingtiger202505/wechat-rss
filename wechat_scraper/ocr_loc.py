@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image, ImageGrab
 from rapidocr_onnxruntime import RapidOCR
 
-from .wechat import get_window_rect, ensure_interactive_desktop
+from .wechat import get_window_rect, ensure_interactive_desktop, get_wechat_browser_hwnd
 
 logger = logging.getLogger("wechat-scraper")
 
