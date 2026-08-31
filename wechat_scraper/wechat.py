@@ -135,28 +135,33 @@ def get_wechat_browser_hwnd(title_keyword: Optional[str] = None) -> Optional[int
     wins = find_windows("wechatappex.exe", class_match="Chrome_WidgetWin")
     wins += find_windows("weixin.exe", class_match="Chrome_WidgetWin")
     
-    # 严格过滤尺寸过小的浮动弹窗/右键菜单 (通常小于 500x450)
-    valid_wins = [w for w in wins if w["w"] >= 500 and w["h"] >= 450]
+    # 严格过滤尺寸过小的浮动弹窗/右键菜单 (通常小于 500x450)，且确保窗口存在
+    valid_wins = [
+        w for w in wins 
+        if w["w"] >= 500 and w["h"] >= 450 and user32.IsWindow(w["hwnd"])
+    ]
     if not valid_wins:
         return None
 
     # 1. 若指定了关键词，优先匹配标题包含关键词的独立主页窗口
     if title_keyword:
         for w in valid_wins:
-            if title_keyword in w["title"]:
+            if w["title"] and title_keyword in w["title"]:
                 return w["hwnd"]
 
-    # 2. 优先匹配面积最大的窗口 (主搜一搜/大主页窗口)
-    valid_wins.sort(key=lambda w: w["w"] * w["h"], reverse=True)
-    return valid_wins[0]["hwnd"]
+    # 2. 优先匹配当前可见且面积最大的有效窗口
+    visible_wins = [w for w in valid_wins if user32.IsWindowVisible(w["hwnd"])]
+    target_list = visible_wins if visible_wins else valid_wins
+    target_list.sort(key=lambda w: w["w"] * w["h"], reverse=True)
+    return target_list[0]["hwnd"]
 
 
 def close_wechat_browser_windows() -> None:
-    """关闭所有在抓取过程中打开的微信内置浏览器/搜一搜/公众号主页窗口 (仅针对独立的 wechatappex 浏览器，绝不触碰微信主进程)。"""
+    """优雅关闭抓取过程中打开的微信独立浏览器/搜一搜/公众号主页窗口 (保留微信主界面并保持 CEF 渲染正常)。"""
     WM_CLOSE = 0x0010
     main_hwnd = get_wechat_main_hwnd()
     
-    # 仅查找独立的 AppEx 浏览器窗口，坚决排除 weixin.exe 主程序窗口
+    # 查找独立的 AppEx / 搜一搜浏览器窗口，发送 WM_CLOSE 优雅退出
     wins = find_windows("wechatappex.exe", class_match="Chrome_WidgetWin")
     for w in wins:
         hwnd = w["hwnd"]

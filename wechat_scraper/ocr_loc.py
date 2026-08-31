@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -10,7 +11,7 @@ import numpy as np
 from PIL import Image, ImageGrab
 from rapidocr_onnxruntime import RapidOCR
 
-from .wechat import get_window_rect, ensure_interactive_desktop, get_wechat_browser_hwnd
+from .wechat import get_window_rect, ensure_interactive_desktop, get_wechat_browser_hwnd, activate_hwnd, user32
 
 logger = logging.getLogger("wechat-scraper")
 
@@ -129,7 +130,7 @@ def is_screen_black_or_blank(
 def find_account_card_in_search(
     account_name: str,
     hwnd: Optional[int] = None,
-    timeout: float = 6.0,
+    timeout: float = 4.0,
 ) -> Tuple[int, int]:
     """在搜一搜结果大页中，轮询定位左侧主结果中的公众号/服务号卡片 (自适应网络加载与黑屏检测)。"""
     import time
@@ -137,8 +138,17 @@ def find_account_card_in_search(
 
     if not hwnd:
         hwnd = get_wechat_browser_hwnd()
+    if hwnd:
+        activate_hwnd(hwnd)
+        time.sleep(0.4)
 
     while time.time() < deadline:
+        if not hwnd or not user32.IsWindow(hwnd):
+            hwnd = get_wechat_browser_hwnd()
+            if hwnd:
+                activate_hwnd(hwnd)
+                time.sleep(0.3)
+
         if hwnd:
             bbox = get_window_rect(hwnd)
         else:
@@ -154,9 +164,11 @@ def find_account_card_in_search(
 
         items, img = ocr_region(bbox)
 
-        # 若页面完全为纯黑且无任何 OCR 结果，等待渲染
+        # 若页面完全为纯黑且无任何 OCR 结果，等待渲染并尝试重新激活
         if is_screen_black_or_blank(img, items):
             logger.debug("搜一搜页面正在渲染中，等待...")
+            if hwnd:
+                activate_hwnd(hwnd)
             time.sleep(0.6)
             continue
 
@@ -223,6 +235,10 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
         logger.warning("未定位到公众号主页窗口，跳过本轮卡片提取。")
         return []
 
+    # 确保公众号主页窗口处于前台激活状态
+    activate_hwnd(hwnd)
+    time.sleep(0.3)
+
     bbox = get_window_rect(hwnd)
     # 确保窗口尺寸有效 (宽和高均大于 300)
     if bbox[2] - bbox[0] < 300 or bbox[3] - bbox[1] < 300:
@@ -234,30 +250,49 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
     # 1. 动态定位顶部导航 Tab 栏 (以「全部/贴图/文章/视频号」为界，严格排除上方所有企业介绍与关注按钮)
     tab_item = next((it for it in items if any(w in it["text"] for w in ["全部", "贴图", "文章", "视频号"])), None)
     if tab_item:
-        tab_bottom = tab_item["bottom"] + 40
+        tab_bottom = tab_item["bottom"] + 20
     else:
         tab_bottom = win_top + 300
         for it in items:
             if it["top"] < win_top + 900 and any(w in it["text"] for w in ["关注", "已关注", "发消息", "合集", "原创", "篇原创", "朋友关注"]):
                 if it["bottom"] > tab_bottom:
                     tab_bottom = it["bottom"]
-        tab_bottom += 40
+        tab_bottom += 20
 
-    # 系统标签与统计干扰词黑名单 (坚决不能作为文章标题)
-    exclude_words = {
+    # 精确黑名单 (仅当整段文字完全等于这些 UI 词时排除，防止误杀带这些字眼的文章标题)
+    exact_exclude = {
         "全部", "贴图", "文章", "视频", "视频号", "合集", "关注", "已关注", "发消息", "服务", 
         "服务号", "订阅号", "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞",
-        "分享", "原创", "篇原创", "置顶", "个内容", "篇内容", "条内容", "朋友关注", "朋友看过",
-        "余下", "条", "篇", "精选", "私信"
+        "分享", "原创", "置顶", "精选", "私信", "今天", "昨天", "前天", "搜索", "取消", "确定",
+        "返回", "关闭", "刷新", "更多", "复制链接", "用浏览器打开", "在浏览器中打开"
     }
+    # 状态与统计词黑名单 (包含即排除)
+    sub_exclude = [
+        "篇原创", "朋友关注", "朋友看过", "个内容", "篇内容", "条内容", "相关搜索", "余下",
+        "微信公众平台", "公众号", "小程序"
+    ]
+
+    def _is_valid_title(txt: str) -> bool:
+        t = txt.strip()
+        if len(t) < 2:
+            return False
+        if t in exact_exclude:
+            return False
+        if any(sub in t for sub in sub_exclude):
+            return False
+        # 纯日期与时间过滤 (如 "08/18", "14:48", "2026-08-31")
+        if (any(t.endswith(d) for d in ["日", "月", "年"]) or "/" in t or ":" in t) and len(t) <= 10:
+            if not any(ch in t for ch in ["涨", "第", "大会", "峰会", "链", "融", "通", "数", "重磅", "万向"]):
+                return False
+        return True
 
     cards = []
     seen_y_bands = []
 
-    def _is_in_existing_band(cy: int, threshold: int = 40) -> bool:
+    def _is_in_existing_band(cy: int, threshold: int = 35) -> bool:
         return any(abs(cy - y) < threshold for y in seen_y_bands)
 
-    # 2. 策略 A: 互动数据锚点关联法 (微信文章卡片底部均标配「阅读/赞/在看」)
+    # 2. 策略 A: 互动数据与时间锚点关联法 (文章卡片底部标配「阅读/赞/在看」或「昨天/xx月xx日」)
     anchors = [
         it for it in items 
         if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享", "次阅读"])
@@ -279,11 +314,7 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
                 dist = anchor_top - it["bottom"]
                 if -5 <= dist <= 140:
                     txt = it["text"].strip()
-                    if (
-                        len(txt) >= 2 
-                        and not any(w in txt for w in exclude_words)
-                        and not (any(txt.endswith(d) for d in ["日", "月", "年"]) and len(txt) <= 8)
-                    ):
+                    if _is_valid_title(txt):
                         title_candidates.append((dist, it))
 
         if title_candidates:
@@ -301,7 +332,7 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
             title_text = f"微信文章_{anchor['top']}"
             click_x, click_y = anchor["cx"], anchor["top"] - 40
 
-        if not _is_in_existing_band(click_y, threshold=40):
+        if not _is_in_existing_band(click_y, threshold=35):
             seen_y_bands.append(click_y)
             cards.append({
                 "title": title_text,
@@ -309,6 +340,21 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
                 "cy": click_y,
                 "top": click_y,
             })
+
+    # 3. 策略 B: 兜底独立卡片识别 (防止多图文或列表项没有阅读数标签时漏识别)
+    if not cards:
+        for it in items:
+            if it["top"] > tab_bottom:
+                txt = it["text"].strip()
+                if _is_valid_title(txt) and it["width"] >= 100 and any("\u4e00" <= ch <= "\u9fff" for ch in txt):
+                    if not _is_in_existing_band(it["cy"], threshold=35):
+                        seen_y_bands.append(it["cy"])
+                        cards.append({
+                            "title": txt,
+                            "cx": it["cx"],
+                            "cy": it["cy"],
+                            "top": it["top"],
+                        })
 
     cards.sort(key=lambda x: x["top"])
     return cards

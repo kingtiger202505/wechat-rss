@@ -84,23 +84,26 @@ def grab_multiple_accounts(
             with out_path.open("a", encoding="utf-8") as fh:
                 fh.write(f"\n# ==================== 【{acc}】 ====================\n")
 
-        res = grab_account_articles(
-            keyword=acc,
-            account_name=acc,
-            count=count,
-            output_file=output_file,
-            output_format=output_format,
-            rss_output=None,
-            incremental=incremental,
-            github_push=False,
-            pause_between=pause_between,
-            clear_existing=False,
-        )
-        all_results.extend(res)
-
-        logger.info("【%s】抓取完毕，准备进入下一个公众号...", acc)
-        _close_current_tab()
-        time.sleep(1.0)
+        try:
+            res = grab_account_articles(
+                keyword=acc,
+                account_name=acc,
+                count=count,
+                output_file=output_file,
+                output_format=output_format,
+                rss_output=None,
+                incremental=incremental,
+                github_push=False,
+                pause_between=pause_between,
+                clear_existing=False,
+            )
+            all_results.extend(res)
+        except Exception as exc:
+            logger.error("【%s】抓取过程中发生异常，自动跳过: %s", acc, exc)
+        finally:
+            logger.info("【%s】处理完毕，清理窗口准备进入下一个公众号...", acc)
+            _clean_close_all_windows()
+            time.sleep(0.5)
 
     # 全部公众号抓取完毕，关闭所有浏览器/搜一搜窗口并释放焦点
     _clean_close_all_windows()
@@ -182,11 +185,11 @@ def grab_account_articles(
 
     # 2. 循环提取文章
     consecutive_no_new = 0
-    max_scroll_attempts = 20
+    max_scroll_attempts = 3
 
     while len(results) < count and consecutive_no_new < max_scroll_attempts:
         # 1. 自动检测并点击展开当前可视区内的「余下 X 篇」折叠文章
-        home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account)
+        home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account) or get_wechat_browser_hwnd() or get_wechat_main_hwnd()
         fold_buttons = find_fold_buttons(hwnd=home_hwnd)
         if fold_buttons:
             for bx, by in fold_buttons:
@@ -280,7 +283,7 @@ def grab_account_articles(
     return results
 
 
-def _search_and_open_account(keyword: str, account_name: str, max_retries: int = 2) -> None:
+def _search_and_open_account(keyword: str, account_name: str, max_retries: int = 1) -> None:
     """搜索关键词并进入公众号主页 (具备黑屏熔断自愈与重试能力)。"""
     for attempt in range(1, max_retries + 1):
         try:
@@ -289,57 +292,69 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
             if not main_hwnd:
                 raise RuntimeError("未找到微信主窗口，请确认微信客户端已登录并处于运行状态。")
             activate_hwnd(main_hwnd)
-            time.sleep(0.4)
+            time.sleep(0.3)
 
             logger.info("步骤 2: 搜索框输入 '%s' 并选择下拉放大镜「🔍 %s」...", keyword, keyword)
-            # 使用微信原生快捷键 Ctrl+F 聚焦搜索框并全选清空
             pyautogui.hotkey("ctrl", "f")
-            time.sleep(0.2)
+            time.sleep(0.15)
             pyautogui.hotkey("ctrl", "a")
             time.sleep(0.1)
             pyautogui.press("backspace")
             time.sleep(0.1)
             type_text(keyword)
-            time.sleep(0.6)
+            time.sleep(0.5)
 
             # 扫描下拉菜单，定位排在「搜索网络结果」下方、放大镜旁边的第 1 个精准关键词条目
             m_rect = get_window_rect(main_hwnd)
-            dropdown_w = max(500, int((m_rect[2] - m_rect[0]) * 0.45))
-            dropdown_h = max(500, int((m_rect[3] - m_rect[1]) * 0.55))
+            dropdown_w = max(600, int((m_rect[2] - m_rect[0]) * 0.5))
+            dropdown_h = max(600, int((m_rect[3] - m_rect[1]) * 0.6))
             dropdown_bbox = (m_rect[0], m_rect[1], m_rect[0] + dropdown_w, m_rect[1] + dropdown_h)
-            items, _ = ocr_region(dropdown_bbox)
-
-            header_bottom = m_rect[1] + 130
-            for it in items:
-                if "搜索网络结果" in it["text"] or "网络结果" in it["text"]:
-                    header_bottom = it["bottom"]
-                    break
 
             target_pos = None
-            for it in items:
-                if it["top"] >= header_bottom - 5 and keyword in it["text"]:
-                    if not any(sub in it["text"] for sub in ["注册", "认证", "公众号", "平台", "模式", "小程序"]):
-                        target_pos = (it["cx"], it["cy"])
-                        logger.info("定位到下拉放大镜条目「🔍 %s」: %s", it["text"], target_pos)
+            drop_deadline = time.time() + 1.5
+            while time.time() < drop_deadline:
+                items, _ = ocr_region(dropdown_bbox)
+                header_bottom = m_rect[1] + 100
+                for it in items:
+                    if "搜索网络结果" in it["text"] or "网络结果" in it["text"]:
+                        header_bottom = it["bottom"]
                         break
+
+                for it in items:
+                    if it["top"] >= header_bottom - 5 and keyword in it["text"]:
+                        if not any(sub in it["text"] for sub in ["注册", "认证", "公众号", "平台", "模式", "小程序"]):
+                            target_pos = (it["cx"], it["cy"])
+                            logger.info("定位到下拉放大镜条目「🔍 %s」: %s", it["text"], target_pos)
+                            break
+
+                if target_pos:
+                    break
+
+                for it in items:
+                    if "网络结果" in it["text"] or "搜一搜" in it["text"]:
+                        target_pos = (it["cx"], it["cy"])
+                        break
+
+                if target_pos:
+                    break
+                time.sleep(0.2)
 
             if target_pos:
                 pyautogui.click(target_pos[0], target_pos[1])
             else:
-                # 兜底：按下方向键选中第 1 个放大镜条目并回车
                 logger.info("按方向键选择第 1 个放大镜条目并回车...")
                 pyautogui.press("down")
                 time.sleep(0.1)
                 pyautogui.press("enter")
 
-            # 轮询查找并激活搜一搜结果浏览器窗口 (最多等待 6 秒)
-            b_deadline = time.time() + 6.0
+            # 轮询查找并激活搜一搜结果窗口 (最多等待 3 秒)
+            b_deadline = time.time() + 3.0
             browser_hwnd = None
             while time.time() < b_deadline:
-                browser_hwnd = get_wechat_browser_hwnd()
+                browser_hwnd = get_wechat_browser_hwnd() or get_wechat_main_hwnd()
                 if browser_hwnd:
                     break
-                time.sleep(0.3)
+                time.sleep(0.25)
 
             if browser_hwnd:
                 activate_hwnd(browser_hwnd)
@@ -350,19 +365,20 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
 
             logger.info("点击进入第 1 个公众号主页: %s...", pos)
             pyautogui.click(pos[0], pos[1])
+            time.sleep(0.8)
 
-            # 事件驱动轮询等待并激活新打开的公众号主页窗口 (最长 6 秒)
-            h_deadline = time.time() + 6.0
+            # 轮询等待并激活新打开的公众号主页窗口 (最多等待 3 秒)
+            h_deadline = time.time() + 3.0
             home_hwnd = None
             while time.time() < h_deadline:
-                home_hwnd = get_wechat_browser_hwnd(title_keyword=account_name)
+                home_hwnd = get_wechat_browser_hwnd(title_keyword=account_name) or get_wechat_browser_hwnd() or get_wechat_main_hwnd()
                 if home_hwnd:
                     break
-                time.sleep(0.3)
+                time.sleep(0.25)
 
             if home_hwnd:
                 activate_hwnd(home_hwnd)
-                time.sleep(0.4)
+                time.sleep(0.3)
 
             logger.info("成功进入公众号主页。")
             return
@@ -371,24 +387,23 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
             if attempt < max_retries:
                 logger.info("正在执行自愈清理: 关闭异常窗口并重试搜索...")
                 close_wechat_browser_windows()
-                time.sleep(0.8)
+                time.sleep(0.5)
                 main_hwnd = get_wechat_main_hwnd()
                 if main_hwnd:
                     activate_hwnd(main_hwnd)
                     pyautogui.press("esc")
-                    time.sleep(0.3)
-                time.sleep(0.5)
+                    time.sleep(0.2)
             else:
                 raise
 
 
 def _copy_link_with_event_wait(
-    max_retries: int = 3,
+    max_retries: int = 1,
     article_title: Optional[str] = None,
     home_hwnd: Optional[int] = None,
 ) -> str:
     """在文章详情页面定位并点击右上角「…」更多按钮，在下拉菜单中点击「复制链接」。"""
-    # 查找文章窗口 (优先查找独立文章窗口，避免激活公众号主页窗口)
+    # 查找文章窗口
     browser_hwnd = None
     if article_title:
         browser_hwnd = get_wechat_browser_hwnd(title_keyword=article_title[:6])
@@ -414,116 +429,58 @@ def _copy_link_with_event_wait(
         return ""
 
     activate_hwnd(browser_hwnd)
-    time.sleep(0.3)
+    time.sleep(0.2)
     rect = get_window_rect(browser_hwnd)
     win_left, win_top, win_right, win_bottom = rect
     actual_top = max(win_top, 0)
-    logger.info("当前文章操作窗口 HWND=%s, 尺寸=(%d, %d, %d, %d)", browser_hwnd, win_left, win_top, win_right, win_bottom)
 
-    # 1. 优先通过图色或 OCR 识别定位「…」更多按钮
-    primary_dots_pos = find_dots_button_pos(hwnd=browser_hwnd)
+    # 定位「…」更多按钮
+    primary_dots_pos = find_dots_button_pos(hwnd=browser_hwnd) or (win_right - 170, actual_top + 22)
 
-    candidate_positions = [
-        primary_dots_pos,
-        (win_right - 170, actual_top + 22),
-        (win_right - 240, actual_top + 40),
-        (win_right - 160, actual_top + 22),
-        (win_right - 180, actual_top + 22),
-        (win_right - 150, actual_top + 22),
-    ]
-    seen_pos = set()
-    unique_candidates = []
-    for pos in candidate_positions:
-        if pos not in seen_pos:
-            seen_pos.add(pos)
-            unique_candidates.append(pos)
+    clear_clipboard()
+    dots_x, dots_y = primary_dots_pos
+    logger.info("点击文章详情页右上角「…」按钮: (%d, %d)...", dots_x, dots_y)
+    pyautogui.click(dots_x, dots_y)
 
-    for attempt in range(1, max_retries + 1):
-        clear_clipboard()
+    menu_bbox = (
+        max(0, win_right - 650),
+        actual_top,
+        win_right,
+        min(win_bottom, actual_top + 800),
+    )
+    copy_pos = None
 
-        for dots_x, dots_y in unique_candidates:
-            logger.info("点击文章详情页右上角「…」按钮: (%d, %d)...", dots_x, dots_y)
-            pyautogui.click(dots_x, dots_y)
-
-            # 宽范围覆盖右上角下拉菜单区域 (杜绝任何边缘裁切)
-            menu_bbox = (
-                max(0, win_right - 650),
-                actual_top,
-                win_right,
-                min(win_bottom, actual_top + 800),
-            )
-            copy_pos = None
-
-            # 轮询识别下拉菜单中的「复制链接」/「复制」(等待动画展开，最长 1.5 秒)
-            poll_deadline = time.time() + 1.5
-            while time.time() < poll_deadline:
-                items, _ = ocr_region(menu_bbox)
-                for it in items:
-                    txt = it["text"].replace(" ", "")
-                    # 匹配「复制链接」、「复制」、「链接地址」等，坚决排除「转发给朋友」与「发送」
-                    if ("复制" in txt or "链接" in txt) and not any(
-                        w in txt for w in ["转", "发", "朋友", "圈", "收藏", "浏览器", "浮窗", "投诉", "搜索", "在看", "赞"]
-                    ):
-                        copy_pos = (it["cx"], it["cy"])
-                        logger.info("在「…」下拉菜单中 OCR 定位到「%s」: (%d, %d)", it["text"], it["cx"], it["cy"])
-                        break
-                if copy_pos:
-                    break
-                time.sleep(0.1)
-
-            # 次选图色匹配「复制链接」
-            if not copy_pos:
-                copy_pos = (
-                    find_image_pos("copy_link.png", bbox=menu_bbox, threshold=0.75)
-                    or find_image_pos("copy.png", bbox=menu_bbox, threshold=0.75)
-                )
-
-            if copy_pos:
-                logger.info("点击下拉菜单中的「复制链接」: (%d, %d)...", copy_pos[0], copy_pos[1])
-                pyautogui.click(copy_pos[0], copy_pos[1])
-
-                # 事件驱动轮询剪贴板 (最长等待 2.5 秒)
-                deadline = time.time() + 2.5
-                while time.time() < deadline:
-                    text = get_clipboard()
-                    if text.startswith("http"):
-                        return text
-                    time.sleep(0.05)
-
-                logger.warning("点击了「复制链接」但剪贴板未获取到有效 URL，重试...")
-            else:
-                logger.debug("当前点击位置 (%d, %d) 未能弹出包含「复制链接」的菜单", dots_x, dots_y)
-                pyautogui.press("esc")
-                time.sleep(0.2)
-
-        # 3. 兜底策略：在文章正文区右键弹出上下文菜单
-        body_x = (win_left + win_right) // 2
-        body_y = actual_top + int((win_bottom - win_top) * 0.45)
-        logger.info("尝试在正文区右键提取复制链接: (%d, %d)...", body_x, body_y)
-        pyautogui.rightClick(body_x, body_y)
-        time.sleep(0.5)
-        context_bbox = (max(0, body_x - 50), max(0, body_y - 50), min(win_right, body_x + 350), min(win_bottom, body_y + 450))
-        c_items, _ = ocr_region(context_bbox)
-        if c_items:
-            logger.info("正文右键菜单 OCR 识别条目: %s", [it["text"] for it in c_items])
-        for it in c_items:
+    # 轮询识别下拉菜单中的「复制链接」/「复制」(最长 1.0 秒)
+    poll_deadline = time.time() + 1.0
+    while time.time() < poll_deadline:
+        items, _ = ocr_region(menu_bbox)
+        for it in items:
             txt = it["text"].replace(" ", "")
-            if ("复制链接" in txt or "链接地址" in txt or ("复制" in txt and "链接" in txt)) and not any(w in txt for w in ["转", "发", "朋友", "圈", "收藏", "浮窗"]):
-                logger.info("右键菜单中定位到「%s」: (%d, %d)", it["text"], it["cx"], it["cy"])
-                pyautogui.click(it["cx"], it["cy"])
-                deadline = time.time() + 2.5
-                while time.time() < deadline:
-                    text = get_clipboard()
-                    if text.startswith("http"):
-                        return text
-                    time.sleep(0.05)
+            if ("复制" in txt or "链接" in txt) and not any(
+                w in txt for w in ["转", "发", "朋友", "圈", "收藏", "浏览器", "浮窗", "投诉", "搜索", "在看", "赞"]
+            ):
+                copy_pos = (it["cx"], it["cy"])
                 break
-        pyautogui.press("esc")
-        time.sleep(0.3)
+        if copy_pos:
+            break
+        time.sleep(0.1)
 
-        logger.debug("第 %d 次提取文章链接未成功，短暂等待后重试...", attempt)
-        time.sleep(0.4)
+    if not copy_pos:
+        copy_pos = find_image_pos("copy_link.png", bbox=menu_bbox, threshold=0.75)
 
+    if copy_pos:
+        logger.info("点击下拉菜单中的「复制链接」: (%d, %d)...", copy_pos[0], copy_pos[1])
+        pyautogui.click(copy_pos[0], copy_pos[1])
+
+        # 轮询剪贴板 (最长等待 1.0 秒)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            text = get_clipboard()
+            if text.startswith("http"):
+                return text
+            time.sleep(0.05)
+
+    pyautogui.press("esc")
     return ""
 
 
@@ -565,6 +522,8 @@ def _scroll_article_list(scroll_amount: int = 600, account_name: Optional[str] =
     """平滑向下滚动公众号文章列表。"""
     browser_hwnd = get_wechat_browser_hwnd(title_keyword=account_name)
     if browser_hwnd:
+        activate_hwnd(browser_hwnd)
+        time.sleep(0.2)
         rect = get_window_rect(browser_hwnd)
         scroll_x = (rect[0] + rect[2]) // 2
         scroll_y = rect[1] + int((rect[3] - rect[1]) * 0.6)
