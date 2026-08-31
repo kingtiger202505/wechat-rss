@@ -169,15 +169,22 @@ def close_wechat_browser_windows() -> None:
 
 
 def activate_hwnd(hwnd: int) -> bool:
-    """平滑激活窗口并置顶恢复 (安全调用系统 API，杜绝模拟热键导致窗口最小化)。"""
+    """平滑激活窗口并置顶恢复 (针对系统托盘隐藏状态智能唤醒，杜绝白屏与二次最小化)。"""
     try:
         ensure_interactive_desktop()
+        # 1. 如果窗口处于托盘隐藏状态 (IsWindowVisible 为 False)，使用快捷键从托盘唤醒
+        if not user32.IsWindowVisible(hwnd):
+            pyautogui.hotkey("ctrl", "alt", "w")
+            time.sleep(0.6)
+
+        # 2. 如果窗口处于最小化状态，调用 SW_RESTORE 恢复
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            time.sleep(0.2)
         else:
             user32.ShowWindow(hwnd, 5)  # SW_SHOW
 
-        # 绕过 Windows 前台锁定并置顶
+        # 3. 绕过 Windows 前台锁定并置顶
         user32.keybd_event(0x12, 0, 0, 0)
         user32.keybd_event(0x12, 0, 2, 0)
         user32.SwitchToThisWindow(hwnd, True)

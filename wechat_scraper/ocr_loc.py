@@ -213,7 +213,7 @@ def find_account_card_in_search(
 
 
 def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
-    """在公众号主页提取文章卡片列表 (严格限定在指定主页窗口内，精准过滤顶部导航与标签)。"""
+    """在公众号主页提取文章卡片列表 (精准锚定阅读量与日期行，杜绝把企业介绍、置顶、合集标签误判为文章)。"""
     if hwnd is None:
         hwnd = get_wechat_browser_hwnd()
     if not hwnd:
@@ -228,17 +228,25 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
     items, img = ocr_region(bbox)
     win_top = bbox[1]
 
-    # 动态定位顶部导航 Tab 栏 (只在顶部 650px 范围内查找，杜绝匹配文章正文)
-    tab_bottom = win_top + 180
-    for it in items:
-        if it["top"] < win_top + 650:
-            txt = it["text"]
-            if any(w in txt for w in ["全部", "贴图", "视频号", "关注", "发消息", "合集", "原创", "篇原创"]):
+    # 1. 动态定位顶部导航 Tab 栏 (以「全部/贴图/文章/视频号」为界，严格排除上方所有企业介绍与关注按钮)
+    tab_item = next((it for it in items if any(w in it["text"] for w in ["全部", "贴图", "文章", "视频号"])), None)
+    if tab_item:
+        tab_bottom = tab_item["bottom"] + 40
+    else:
+        tab_bottom = win_top + 300
+        for it in items:
+            if it["top"] < win_top + 900 and any(w in it["text"] for w in ["关注", "已关注", "发消息", "合集", "原创", "篇原创", "朋友关注"]):
                 if it["bottom"] > tab_bottom:
                     tab_bottom = it["bottom"]
+        tab_bottom += 40
 
-    # 增加 50px 缓冲区避开可能存在的小标签胶囊 (如 供应链金融 / 票据 等)
-    tab_bottom += 50
+    # 系统标签与统计干扰词黑名单 (坚决不能作为文章标题)
+    exclude_words = {
+        "全部", "贴图", "文章", "视频", "视频号", "合集", "关注", "已关注", "发消息", "服务", 
+        "服务号", "订阅号", "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞",
+        "分享", "原创", "篇原创", "置顶", "个内容", "篇内容", "条内容", "朋友关注", "朋友看过",
+        "余下", "条", "篇", "精选", "私信"
+    }
 
     cards = []
     seen_y_bands = []
@@ -246,35 +254,48 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
     def _is_in_existing_band(cy: int, threshold: int = 40) -> bool:
         return any(abs(cy - y) < threshold for y in seen_y_bands)
 
-    # 1. 策略 A: 阅读/互动锚点关联法
-    read_anchors = [
+    # 2. 策略 A: 互动数据与日期锚点关联法 (微信文章卡片下方均有「阅读/赞」或日期)
+    anchors = [
         it for it in items 
-        if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享"])
+        if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享", "次阅读"])
     ]
+    # 补充日期类锚点 (针对无阅读数标识的文章卡片)
+    date_anchors = [
+        it for it in items
+        if it["top"] > tab_bottom and (any(it["text"].endswith(d) for d in ["日", "月", "年"]) or any(w in it["text"] for w in ["昨天", "前天"]))
+        and not _is_in_existing_band(it["cy"], threshold=30)
+    ]
+    all_anchors = anchors + date_anchors
 
-    for anchor in read_anchors:
+    for anchor in all_anchors:
         anchor_top = anchor["top"]
         title_candidates = []
         for it in items:
             if it == anchor:
                 continue
-            if it["top"] >= tab_bottom and it["bottom"] <= anchor_top + 10:
+            if it["top"] >= tab_bottom and it["bottom"] <= anchor_top + 15:
                 dist = anchor_top - it["bottom"]
-                if -5 <= dist <= 140:
+                if -5 <= dist <= 130:
                     txt = it["text"].strip()
-                    if len(txt) >= 4 and not any(txt.endswith(d) for d in ["日", "月", "年"]):
+                    if len(txt) >= 2 and not any(w in txt for w in exclude_words):
                         title_candidates.append((dist, it))
 
         if title_candidates:
-            title_candidates.sort(key=lambda x: x[0], reverse=True)
+            # 优先选择包含中文的候选词，并按距离锚点由近到远排序 (距离最近的才是紧挨着的主标题)
+            title_candidates.sort(
+                key=lambda item_dist: (
+                    not any("\u4e00" <= ch <= "\u9fff" for ch in item_dist[1]["text"]),
+                    item_dist[0],
+                )
+            )
             best_item = title_candidates[0][1]
             title_text = best_item["text"]
             click_x, click_y = best_item["cx"], best_item["cy"]
         else:
             title_text = f"微信文章_{anchor['top']}"
-            click_x, click_y = anchor["cx"], anchor["top"] - 35
+            click_x, click_y = anchor["cx"], anchor["top"] - 40
 
-        if not _is_in_existing_band(click_y):
+        if not _is_in_existing_band(click_y, threshold=40):
             seen_y_bands.append(click_y)
             cards.append({
                 "title": title_text,
@@ -283,42 +304,12 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
                 "top": click_y,
             })
 
-    # 2. 策略 B: 标题语义文本块识别法 (覆盖无「阅读」标注的次条文章和图文卡片)
-    system_words = {
-        "全部", "贴图", "文章", "视频", "视频号", "合集", "关注", "已关注", "发消息", "服务", 
-        "服务号", "订阅号", "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞",
-        "分享", "原创", "篇原创"
-    }
-
-    for it in items:
-        if it["top"] <= tab_bottom + 10:
-            continue
-        txt = it["text"].strip()
-        if len(txt) < 4:
-            continue
-        # 排除纯系统按钮、纯日期和折叠按钮
-        if any(w in txt for w in system_words) or any(w in txt for w in ["余下", "条", "篇"]):
-            continue
-        if any(txt.endswith(d) for d in ["日", "月", "年"]) and len(txt) <= 8:
-            continue
-        if txt.isdigit():
-            continue
-
-        if not _is_in_existing_band(it["cy"], threshold=40):
-            seen_y_bands.append(it["cy"])
-            cards.append({
-                "title": txt,
-                "cx": it["cx"],
-                "cy": it["cy"],
-                "top": it["cy"],
-            })
-
     cards.sort(key=lambda x: x["top"])
     return cards
 
 
 def find_fold_buttons(hwnd: Optional[int] = None) -> List[Tuple[int, int]]:
-    """识别当前公众号主页内的「余下 X 篇」折叠展开按钮。"""
+    """识别当前公众号主页内的折叠展开按钮 (包括「余下 X 篇」、「X 个内容」、「展开」等)。"""
     if hwnd is None:
         hwnd = get_wechat_browser_hwnd()
     bbox = get_window_rect(hwnd) if hwnd else None
@@ -326,9 +317,13 @@ def find_fold_buttons(hwnd: Optional[int] = None) -> List[Tuple[int, int]]:
     items, _ = ocr_region(bbox)
     buttons = []
     for it in items:
-        txt = it["text"]
-        if "余下" in txt and ("篇" in txt or "条" in txt):
-            logger.info("检测到折叠展开按钮: %r at (%d, %d)", txt, it["cx"], it["cy"])
+        txt = it["text"].replace(" ", "")
+        if (
+            ("余下" in txt and any(w in txt for w in ["篇", "条", "内容"]))
+            or any(w in txt for w in ["个内容", "篇内容", "条内容"])
+            or txt == "展开"
+        ):
+            logger.info("检测到折叠展开按钮: %r at (%d, %d)", it["text"], it["cx"], it["cy"])
             buttons.append((it["cx"], it["cy"]))
     return buttons
 
