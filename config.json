@@ -1,8 +1,8 @@
 {
   "account": [
-    "简单汇"
+    "建信融通"
   ],
-  "count": 3,
+  "count": 1,
   "incremental": true,
   "output": "article_links.txt",
   "rss": "feed.xml",
