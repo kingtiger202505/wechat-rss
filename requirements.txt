@@ -1,0 +1,8 @@
+pyautogui
+pyperclip
+Pillow
+numpy
+rapidocr-onnxruntime
+pywin32
+psutil
+beautifulsoup4
