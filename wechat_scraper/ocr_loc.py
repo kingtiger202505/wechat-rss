@@ -138,10 +138,16 @@ def find_account_card_in_search(
     return (default_x, default_y)
 
 
-def find_article_cards() -> List[Dict[str, Any]]:
-    """在公众号主页提取文章卡片列表 (支持 阅读锚点 + 标题语义多重识别，彻底避免漏卡片)。"""
-    items, _ = ocr_region()
-    tab_bottom = 0
+def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
+    """在公众号主页提取文章卡片列表 (严格限定在微信浏览器窗口内，彻底杜绝外界窗口干扰)。"""
+    if hwnd is None:
+        hwnd = get_wechat_browser_hwnd()
+    bbox = get_window_rect(hwnd) if hwnd else None
+
+    items, _ = ocr_region(bbox)
+    win_top = bbox[1] if bbox else 0
+
+    tab_bottom = win_top
     for it in items:
         if it["text"] in ["全部", "视频", "合集", "关注", "发消息"]:
             if it["bottom"] > tab_bottom:
@@ -153,7 +159,7 @@ def find_article_cards() -> List[Dict[str, Any]]:
     def _is_in_existing_band(cy: int, threshold: int = 40) -> bool:
         return any(abs(cy - y) < threshold for y in seen_y_bands)
 
-    # 1. 策略 A: 阅读锚点关联法
+    # 1. 策略 A: 阅读/互动锚点关联法
     read_anchors = [
         it for it in items 
         if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享"])
@@ -189,7 +195,7 @@ def find_article_cards() -> List[Dict[str, Any]]:
                 "top": click_y,
             })
 
-    # 2. 策略 B: 标题文本块识别法 (覆盖无「阅读」标注的次条文章和图文卡片)
+    # 2. 策略 B: 标题语义文本块识别法 (覆盖无「阅读」标注的次条文章和图文卡片)
     system_words = {
         "全部", "视频", "合集", "关注", "发消息", "服务", "服务号", "订阅号", 
         "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞"
@@ -222,9 +228,13 @@ def find_article_cards() -> List[Dict[str, Any]]:
     return cards
 
 
-def find_fold_buttons() -> List[Tuple[int, int]]:
-    """识别当前主页可视区内的「余下 X 篇」折叠展开按钮。"""
-    items, _ = ocr_region()
+def find_fold_buttons(hwnd: Optional[int] = None) -> List[Tuple[int, int]]:
+    """识别当前公众号主页内的「余下 X 篇」折叠展开按钮。"""
+    if hwnd is None:
+        hwnd = get_wechat_browser_hwnd()
+    bbox = get_window_rect(hwnd) if hwnd else None
+
+    items, _ = ocr_region(bbox)
     buttons = []
     for it in items:
         txt = it["text"]
@@ -234,6 +244,11 @@ def find_fold_buttons() -> List[Tuple[int, int]]:
     return buttons
 
 
-def find_dots_button_pos() -> Tuple[int, int]:
+def find_dots_button_pos(hwnd: Optional[int] = None) -> Tuple[int, int]:
     """定位微信文章正文右上角的「…」更多按钮。"""
+    if hwnd is None:
+        hwnd = get_wechat_browser_hwnd()
+    if hwnd:
+        rect = get_window_rect(hwnd)
+        return (rect[2] - 50, rect[1] + 43)
     return (2276, 43)
