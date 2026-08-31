@@ -404,7 +404,14 @@ def _close_if_article_open() -> None:
 
 def _scroll_article_list(scroll_amount: int = 600) -> None:
     """平滑向下滚动公众号文章列表。"""
-    pyautogui.moveTo(1200, 1100)
+    browser_hwnd = get_wechat_browser_hwnd()
+    if browser_hwnd:
+        rect = get_window_rect(browser_hwnd)
+        scroll_x = (rect[0] + rect[2]) // 2
+        scroll_y = rect[1] + int((rect[3] - rect[1]) * 0.6)
+    else:
+        scroll_x, scroll_y = 1200, 1100
+    pyautogui.moveTo(scroll_x, scroll_y)
     time.sleep(0.1)
     pyautogui.scroll(-scroll_amount)
     time.sleep(0.8)

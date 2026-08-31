@@ -139,22 +139,26 @@ def find_account_card_in_search(
 
 
 def find_article_cards() -> List[Dict[str, Any]]:
-    """在公众号主页动态提取文章卡片列表 (基于「阅读」锚点 100% 确定性识别)。"""
+    """在公众号主页提取文章卡片列表 (支持 阅读锚点 + 标题语义多重识别，彻底避免漏卡片)。"""
     items, _ = ocr_region()
     tab_bottom = 0
     for it in items:
-        if it["text"] in ["全部", "视频", "合集", "关注"]:
+        if it["text"] in ["全部", "视频", "合集", "关注", "发消息"]:
             if it["bottom"] > tab_bottom:
                 tab_bottom = it["bottom"]
 
-    read_anchors = []
-    for it in items:
-        if it["top"] <= tab_bottom:
-            continue
-        if it["text"].startswith("阅读") or "阅读 " in it["text"] or it["text"] == "阅读":
-            read_anchors.append(it)
-
     cards = []
+    seen_y_bands = []
+
+    def _is_in_existing_band(cy: int, threshold: int = 40) -> bool:
+        return any(abs(cy - y) < threshold for y in seen_y_bands)
+
+    # 1. 策略 A: 阅读锚点关联法
+    read_anchors = [
+        it for it in items 
+        if it["top"] > tab_bottom and any(w in it["text"] for w in ["阅读", "赞", "在看", "分享"])
+    ]
+
     for anchor in read_anchors:
         anchor_top = anchor["top"]
         title_candidates = []
@@ -163,27 +167,56 @@ def find_article_cards() -> List[Dict[str, Any]]:
                 continue
             if it["top"] >= tab_bottom and it["bottom"] <= anchor_top + 10:
                 dist = anchor_top - it["bottom"]
-                if -5 <= dist <= 90:
+                if -5 <= dist <= 100:
                     if len(it["text"]) >= 2 and not it["text"].isdigit():
                         title_candidates.append((dist, it))
 
         if title_candidates:
             title_candidates.sort(key=lambda x: x[0])
-            best_title_item = title_candidates[0][1]
-            title_text = best_title_item["text"]
-            click_x = best_title_item["cx"]
-            click_y = best_title_item["cy"]
+            best_item = title_candidates[0][1]
+            title_text = best_item["text"]
+            click_x, click_y = best_item["cx"], best_item["cy"]
         else:
             title_text = f"微信文章_{anchor['top']}"
-            click_x = anchor["cx"]
-            click_y = anchor["top"] - 35
+            click_x, click_y = anchor["cx"], anchor["top"] - 35
 
-        cards.append({
-            "title": title_text,
-            "cx": click_x,
-            "cy": click_y,
-            "top": click_y,
-        })
+        if not _is_in_existing_band(click_y):
+            seen_y_bands.append(click_y)
+            cards.append({
+                "title": title_text,
+                "cx": click_x,
+                "cy": click_y,
+                "top": click_y,
+            })
+
+    # 2. 策略 B: 标题文本块识别法 (覆盖无「阅读」标注的次条文章和图文卡片)
+    system_words = {
+        "全部", "视频", "合集", "关注", "发消息", "服务", "服务号", "订阅号", 
+        "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞"
+    }
+
+    for it in items:
+        if it["top"] <= tab_bottom + 10:
+            continue
+        txt = it["text"].strip()
+        if len(txt) < 3:
+            continue
+        # 排除纯系统按钮、纯日期和折叠按钮
+        if txt in system_words or any(w in txt for w in ["余下", "条", "篇"]):
+            continue
+        if any(txt.endswith(d) for d in ["日", "月", "年"]) and len(txt) <= 8:
+            continue
+        if txt.isdigit():
+            continue
+
+        if not _is_in_existing_band(it["cy"], threshold=40):
+            seen_y_bands.append(it["cy"])
+            cards.append({
+                "title": txt,
+                "cx": it["cx"],
+                "cy": it["cy"],
+                "top": it["cy"],
+            })
 
     cards.sort(key=lambda x: x["top"])
     return cards
