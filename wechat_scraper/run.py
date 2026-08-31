@@ -185,7 +185,21 @@ def grab_account_articles(
 
     # 2. 循环提取文章
     consecutive_no_new = 0
-    max_scroll_attempts = 3
+    consecutive_history_hits = 0
+    max_scroll_attempts = 2
+    max_history_hits_to_stop = 2  # 增量模式下，顶部连续命中历史即判定无新发布，立即早停
+
+    def _is_in_history(t: str) -> bool:
+        if not t or len(t) < 2:
+            return False
+        if t in history_titles:
+            return True
+        t_clean = t.strip().rstrip(".").rstrip("。")
+        if len(t_clean) >= 4:
+            for ht in history_titles:
+                if t_clean in ht or ht in t_clean:
+                    return True
+        return False
 
     while len(results) < count and consecutive_no_new < max_scroll_attempts:
         # 1. 自动检测并点击展开当前可视区内的「余下 X 篇」折叠文章
@@ -195,9 +209,9 @@ def grab_account_articles(
             for bx, by in fold_buttons:
                 logger.info("检测到折叠文章，自动点击「展开」: (%d, %d)", bx, by)
                 pyautogui.click(bx, by)
-                time.sleep(0.5)
+                time.sleep(0.3)
 
-        # 2. 获取当前主页文章卡片 (动态定位「全部」Tab 过滤账号头部元数据)
+        # 2. 获取当前主页文章卡片
         cards = find_article_cards(hwnd=home_hwnd)
         new_in_view = [c for c in cards if c["title"] not in seen_titles]
 
@@ -205,7 +219,7 @@ def grab_account_articles(
             logger.info("当前可视区域无新文章，向下滚动加载更多...")
             _scroll_article_list(account_name=target_account)
             consecutive_no_new += 1
-            time.sleep(1.2)
+            time.sleep(0.8)
             continue
 
         consecutive_no_new = 0
@@ -216,9 +230,13 @@ def grab_account_articles(
             title = card["title"]
             seen_titles.add(title)
 
-            # 增量检查：如果文章标题已经在历史库中，跳过
-            if incremental and title in history_titles:
+            # 增量检查：如果文章标题已在历史库中（支持模糊匹配），直接跳过
+            if incremental and _is_in_history(title):
+                consecutive_history_hits += 1
                 logger.info("  ! 增量跳过 (历史已抓取): %s", title)
+                if consecutive_history_hits >= max_history_hits_to_stop:
+                    logger.info("  ✓ 增量检测：顶部最新文章均已在库，该账号近期无新发布，快速完成")
+                    break
                 continue
 
             idx = len(results) + 1
@@ -226,7 +244,7 @@ def grab_account_articles(
 
             # 点击文章卡片进入正文详情页
             pyautogui.click(card["cx"], card["cy"])
-            time.sleep(1.8)
+            time.sleep(0.9)
 
             # 在详情页提取「复制链接」
             url = _copy_link_with_event_wait(article_title=title, home_hwnd=home_hwnd)
@@ -234,9 +252,14 @@ def grab_account_articles(
 
             if url and url.startswith("http") and url not in seen_urls:
                 if incremental and url in history_urls:
+                    consecutive_history_hits += 1
                     logger.info("  ! 增量跳过 (URL 历史已存在): %s", url)
+                    if consecutive_history_hits >= max_history_hits_to_stop:
+                        logger.info("  ✓ 增量检测：最新链接已在库，快速完成该账号")
+                        break
                     continue
 
+                consecutive_history_hits = 0
                 seen_urls.add(url)
                 record = {"account": target_account, "title": title, "url": url}
                 results.append(record)
@@ -249,10 +272,14 @@ def grab_account_articles(
 
             time.sleep(pause_between)
 
+        # 若已早停触发，直接退出外层循环
+        if incremental and consecutive_history_hits >= max_history_hits_to_stop:
+            break
+
         # 本屏文章处理完后，滚动翻页
         if len(results) < count:
             _scroll_article_list(account_name=target_account)
-            time.sleep(1.0)
+            time.sleep(0.6)
 
     if rss_output and results:
         generate_rss_xml(

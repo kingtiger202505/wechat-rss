@@ -26,6 +26,31 @@ def generate_rss_xml(
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
     build_date = format_datetime(now)
 
+    # 并发预提取未包含图文正文的文章
+    if fetch_full_content:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _enrich_record(rec: Dict[str, Any]) -> Dict[str, Any]:
+            url = rec.get("url", "").strip()
+            content_html = rec.get("content_html", "")
+            if (not content_html or len(content_html) < 100) and url.startswith("http"):
+                try:
+                    details = fetch_article_details(url)
+                    if details.get("title"):
+                        rec["title"] = details["title"]
+                    if details.get("account") and not rec.get("account"):
+                        rec["account"] = details["account"]
+                    if details.get("cover_url"):
+                        rec["cover_url"] = details["cover_url"]
+                    rec["content_html"] = details.get("content_html", "")
+                    rec["content_markdown"] = details.get("content_markdown", "") or details.get("content_text", "")
+                except Exception as e:
+                    logger.debug("抓取正文与图片异常: %s", e)
+            return rec
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            records = list(executor.map(_enrich_record, records))
+
     items_xml = []
     for r in records:
         url = r.get("url", "").strip()
@@ -35,21 +60,6 @@ def generate_rss_xml(
         content_html = r.get("content_html", "")
         content_md = r.get("content_markdown", "") or r.get("content_text", "")
         pub_time = r.get("publish_time") or r.get("time") or build_date
-
-        # 如果未包含完整图文，在线提取正文与全部配图
-        if fetch_full_content and (not content_html or len(content_html) < 100) and url.startswith("http"):
-            try:
-                details = fetch_article_details(url)
-                if details.get("title"):
-                    title = details["title"]
-                if details.get("account") and not account:
-                    account = details["account"]
-                if details.get("cover_url"):
-                    cover_url = details["cover_url"]
-                content_html = details.get("content_html", "")
-                content_md = details.get("content_markdown", "") or details.get("content_text", "")
-            except Exception as e:
-                logger.debug("抓取正文与图片异常: %s", e)
 
         if not title:
             title = f"【{account}】文章" if account else "微信文章"
