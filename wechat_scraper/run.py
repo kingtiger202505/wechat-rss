@@ -337,26 +337,48 @@ def _search_and_open_account(keyword: str, account_name: str) -> None:
 
 
 def _copy_link_with_event_wait(max_retries: int = 3) -> str:
-    """点击右上角「…」并提取复制链接，使用剪贴板事件轮询。"""
+    """在文章正文区右键点击或点击操作菜单提取复制链接，使用剪贴板事件轮询。"""
+    browser_hwnd = get_wechat_browser_hwnd()
+    if browser_hwnd:
+        rect = get_window_rect(browser_hwnd)
+        body_x = (rect[0] + rect[2]) // 2
+        body_y = rect[1] + int((rect[3] - rect[1]) * 0.45)
+    else:
+        body_x, body_y = 1200, 600
+
     for attempt in range(1, max_retries + 1):
         clear_clipboard()
 
-        # 1. 点击右上角「…」 (物理坐标 2276, 43)
-        pyautogui.click(2276, 43)
-        time.sleep(0.7)
+        # 方法 1: 直接在文章正文中央区域右键弹出菜单
+        pyautogui.rightClick(body_x, body_y)
+        time.sleep(0.4)
 
-        # 2. 定位「复制链接」菜单项
-        menu_pos = find_text_pos("复制链接", min_score=0.6)
-        if not menu_pos:
-            logger.debug("第 %d 次未直接检测到「复制链接」菜单项，重试...", attempt)
+        # 查找「复制链接」或「复制链接地址」菜单项
+        menu_pos = find_text_pos("复制链接", min_score=0.55) or find_text_pos("链接地址", min_score=0.55)
+        
+        if menu_pos:
+            logger.info("右键菜单中定位到「复制链接」: %s", menu_pos)
+            pyautogui.click(menu_pos[0], menu_pos[1])
+        else:
+            # 方法 2: 若右键菜单未出现，按 Esc 退出后尝试右上角分享按钮
             pyautogui.press("esc")
-            time.sleep(0.3)
-            continue
+            time.sleep(0.2)
+            # 点击右上角分享/更多图标 (避开标签栏最右侧)
+            if browser_hwnd:
+                rect = get_window_rect(browser_hwnd)
+                dots_x = rect[2] - 120
+                dots_y = rect[1] + 45
+            else:
+                dots_x, dots_y = 2100, 45
+            pyautogui.click(dots_x, dots_y)
+            time.sleep(0.5)
+            menu_pos = find_text_pos("复制链接", min_score=0.55)
+            if menu_pos:
+                pyautogui.click(menu_pos[0], menu_pos[1])
+            else:
+                pyautogui.press("esc")
 
-        # 3. 点击「复制链接」
-        pyautogui.click(menu_pos[0], menu_pos[1])
-
-        # 4. 事件驱动轮询剪贴板 (最长等待 2.5 秒)
+        # 事件驱动轮询剪贴板 (最长等待 2.5 秒)
         deadline = time.time() + 2.5
         while time.time() < deadline:
             text = get_clipboard()
@@ -364,7 +386,7 @@ def _copy_link_with_event_wait(max_retries: int = 3) -> str:
                 return text
             time.sleep(0.05)
 
-        # 若未成功，按 Esc 退出菜单并重试
+        logger.debug("第 %d 次未复制到有效 URL，重试...", attempt)
         pyautogui.press("esc")
         time.sleep(0.3)
 
