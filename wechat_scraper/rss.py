@@ -38,10 +38,13 @@ def generate_rss_xml(
                     details = fetch_article_details(url)
                     if details.get("title"):
                         rec["title"] = details["title"]
-                    if details.get("account") and not rec.get("account"):
+                    if details.get("account"):
                         rec["account"] = details["account"]
                     if details.get("cover_url"):
                         rec["cover_url"] = details["cover_url"]
+                    if details.get("publish_time"):
+                        rec["publish_time"] = details["publish_time"]
+                        rec["time"] = details["publish_time"]
                     rec["content_html"] = details.get("content_html", "")
                     rec["content_markdown"] = details.get("content_markdown", "") or details.get("content_text", "")
                 except Exception as e:
@@ -124,7 +127,7 @@ def parse_links_txt_to_records(txt_path: str | Path) -> List[Dict[str, Any]]:
 
     lines = p.read_text(encoding="utf-8").splitlines()
     records = []
-    current_account = "微信公众号"
+    current_account = ""
 
     for line in lines:
         line = line.strip()
@@ -140,7 +143,7 @@ def parse_links_txt_to_records(txt_path: str | Path) -> List[Dict[str, Any]]:
         if line.startswith("http"):
             records.append({
                 "account": current_account,
-                "title": f"【{current_account}】文章分享",
+                "title": f"【{current_account}】文章" if current_account else "",
                 "url": line,
             })
 
@@ -151,8 +154,11 @@ def convert_txt_to_rss(
     txt_path: str | Path = "article_links.txt",
     output_rss: str | Path = "feed.xml",
     channel_title: str = "微信公众号文章精选",
+    sync_history: bool = True,
+    full_links_file: Optional[str | Path] = "all_links.txt",
+    full_rss_output: Optional[str | Path] = "full_feed.xml",
 ) -> Path:
-    """直接将现有的 article_links.txt 转换为含完整图文的 RSS 文件。"""
+    """直接将现有的 article_links.txt 转换为含完整图文的 RSS 文件，并同步更新历史归档。"""
     records = parse_links_txt_to_records(txt_path)
     generate_rss_xml(
         records=records,
@@ -160,6 +166,19 @@ def convert_txt_to_rss(
         output_path=output_rss,
         fetch_full_content=True,
     )
+    if sync_history and records:
+        from .history import update_history_and_archives
+        full_history, _ = update_history_and_archives(
+            new_records=records,
+            full_links_file=full_links_file,
+        )
+        if full_rss_output and full_history:
+            generate_rss_xml(
+                records=full_history,
+                channel_title="微信公众号文章全量归档订阅",
+                output_path=full_rss_output,
+                fetch_full_content=False,
+            )
     return Path(output_rss)
 
 
@@ -169,7 +188,8 @@ if __name__ == "__main__":
     parser.add_argument("--input", "-i", default="article_links.txt", help="输入的链接文件路径 (默认 article_links.txt)")
     parser.add_argument("--output", "-o", default="feed.xml", help="输出的 RSS XML 文件路径 (默认 feed.xml)")
     parser.add_argument("--title", "-t", default="微信公众号文章精选", help="RSS 订阅源 Channel 标题")
+    parser.add_argument("--no-history", action="store_true", help="不更新全量历史库")
     args = parser.parse_args()
 
-    out = convert_txt_to_rss(args.input, args.output, args.title)
+    out = convert_txt_to_rss(args.input, args.output, args.title, sync_history=not args.no_history)
     print(f"[OK] 完整图文 RSS 订阅源已成功生成: {out.resolve()}")

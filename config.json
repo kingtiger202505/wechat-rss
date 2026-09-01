@@ -1,10 +1,10 @@
 {
   "account": [
    
-    "数秦科技",
-    "浦江数链"
+    "上海交大上海高级金融学院"
+
   ],
-  "count": 1,
+  "count": 50,
   "incremental": true,
   "output": "article_links.txt",
   "rss": "feed.xml",

@@ -111,15 +111,31 @@ def fetch_article_details(url: str, timeout: int = 10) -> Dict[str, Any]:
             result["digest"] = str(desc_meta.get("content", "")).strip()
 
         # 5. 提取发布时间
-        time_match = re.search(r'var createTime = ["\']?(\d+)["\']?', html_raw)
+        time_match = re.search(r'var\s+createTime\s*=\s*["\']([^"\']+)["\']', html_raw)
+        if not time_match:
+            time_match = re.search(r'var\s+createTime\s*=\s*(\d+)', html_raw)
+        if not time_match:
+            time_match = re.search(r'var\s+ct\s*=\s*["\']?(\d+)["\']?', html_raw)
+
         if time_match:
             try:
                 import datetime
-                ts = int(time_match.group(1))
-                dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone(datetime.timedelta(hours=8)))
-                result["publish_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+                val = time_match.group(1).strip()
+                if val.isdigit():
+                    ts = int(val)
+                    if len(val) == 13:
+                        ts = ts // 1000
+                    dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone(datetime.timedelta(hours=8)))
+                    result["publish_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+                elif "-" in val:
+                    result["publish_time"] = val
             except Exception:
                 pass
+
+        if not result["publish_time"]:
+            time_el = soup.find("em", id="publish_time") or soup.find("span", id="publish_time")
+            if time_el and time_el.get_text().strip():
+                result["publish_time"] = time_el.get_text().strip()
 
         # 6. 提取与清洗正文
         content_div = soup.find("div", id="js_content")
