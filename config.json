@@ -1,10 +1,10 @@
 {
   "account": [
    
-    "上海交大上海高级金融学院"
+    "蚂蚁数科"
 
   ],
-  "count": 50,
+  "count": 3,
   "incremental": true,
   "output": "article_links.txt",
   "rss": "feed.xml",
