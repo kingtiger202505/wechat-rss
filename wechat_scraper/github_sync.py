@@ -68,6 +68,7 @@ def sync_to_github(
             "config.json",
             "requirements.txt",
             "wechat_scraper",
+            "temp",
         ]
 
     added_any = False
