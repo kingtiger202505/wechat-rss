@@ -186,8 +186,10 @@ def grab_account_articles(
     # 2. 循环提取文章
     consecutive_no_new = 0
     consecutive_history_hits = 0
+    consecutive_copy_failures = 0
     max_scroll_attempts = 2
     max_history_hits_to_stop = 2  # 增量模式下，顶部连续命中历史即判定无新发布，立即早停
+    max_consecutive_failures_to_recover = 2  # 连续失败熔断阈值
 
     def _is_in_history(t: str) -> bool:
         if not t or len(t) < 2:
@@ -203,7 +205,15 @@ def grab_account_articles(
 
     while len(results) < count and consecutive_no_new < max_scroll_attempts:
         # 1. 自动检测并点击展开当前可视区内的「余下 X 篇」折叠文章
-        home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account) or get_wechat_browser_hwnd() or get_wechat_main_hwnd()
+        home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account) or get_wechat_browser_hwnd()
+        if not home_hwnd:
+            logger.warning("未检测到公众号主页窗口，尝试重新恢复...")
+            _search_and_open_account(keyword=keyword, account_name=target_account)
+            home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account) or get_wechat_browser_hwnd()
+            if not home_hwnd:
+                logger.error("无法定位公众号主页窗口，结束当前账号抓取。")
+                break
+
         fold_buttons = find_fold_buttons(hwnd=home_hwnd)
         if fold_buttons:
             for bx, by in fold_buttons:
@@ -239,16 +249,50 @@ def grab_account_articles(
                     break
                 continue
 
+            # 1. 视口几何安全护栏：卡片坐标必须严格位于公众号主页内容视口内，杜绝点击侧边栏或外窗口
+            win_rect = get_window_rect(home_hwnd)
+            safe_min_x = win_rect[0] + 50
+            safe_max_x = win_rect[2] - 50
+            safe_min_y = win_rect[1] + 110
+            safe_max_y = win_rect[3] - 20
+            if not (safe_min_x <= card["cx"] <= safe_max_x and safe_min_y <= card["cy"] <= safe_max_y):
+                logger.warning("  ! [护栏拦截] 卡片「%s」坐标 (%d, %d) 超出公众号主页内容安全区域，丢弃该项杜绝乱点", title, card["cx"], card["cy"])
+                continue
+
+            # 2. 点击前状态自净：激活主页并按 ESC 清除可能遗留的右键菜单或弹窗
+            activate_hwnd(home_hwnd)
+            time.sleep(0.15)
+            pyautogui.press("esc")
+            time.sleep(0.1)
+
             idx = len(results) + 1
             logger.info("[%d/%d] 正在处理文章: %s (坐标: %d, %d)", idx, count, title, card["cx"], card["cy"])
 
             # 点击文章卡片进入正文详情页
             pyautogui.click(card["cx"], card["cy"])
-            time.sleep(0.9)
+            time.sleep(1.2)
 
             # 在详情页提取「复制链接」
             url = _copy_link_with_event_wait(article_title=title, home_hwnd=home_hwnd)
-            _close_current_tab(home_hwnd=home_hwnd)
+            if url and url.startswith("http"):
+                _close_current_tab(home_hwnd=home_hwnd)
+                consecutive_copy_failures = 0
+            else:
+                consecutive_copy_failures += 1
+                # 未能提取有效链接时，仅按 ESC 退出可能弹出的菜单，严禁发 Ctrl+W 误关主页！
+                pyautogui.press("esc")
+                time.sleep(0.3)
+                if home_hwnd:
+                    activate_hwnd(home_hwnd)
+
+                if consecutive_copy_failures >= max_consecutive_failures_to_recover:
+                    logger.warning("  ! 连续 %d 次复制链接失败，界面状态可能已脱节，正在触发自动化自愈重置...", consecutive_copy_failures)
+                    _clean_close_all_windows()
+                    time.sleep(0.5)
+                    _search_and_open_account(keyword=keyword, account_name=target_account)
+                    home_hwnd = get_wechat_browser_hwnd(title_keyword=target_account) or get_wechat_browser_hwnd()
+                    consecutive_copy_failures = 0
+                    break
 
             if url and url.startswith("http") and url not in seen_urls:
                 if incremental and url in history_urls:
@@ -398,7 +442,7 @@ def _search_and_open_account(keyword: str, account_name: str, max_retries: int =
             h_deadline = time.time() + 3.0
             home_hwnd = None
             while time.time() < h_deadline:
-                home_hwnd = get_wechat_browser_hwnd(title_keyword=account_name) or get_wechat_browser_hwnd() or get_wechat_main_hwnd()
+                home_hwnd = get_wechat_browser_hwnd(title_keyword=account_name) or get_wechat_browser_hwnd()
                 if home_hwnd:
                     break
                 time.sleep(0.25)

@@ -271,17 +271,18 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
         "全部", "贴图", "文章", "视频", "视频号", "合集", "关注", "已关注", "发消息", "服务", 
         "服务号", "订阅号", "小程序", "展开", "收起", "相关搜索", "微信", "阅读", "在看", "赞",
         "分享", "原创", "置顶", "精选", "私信", "今天", "昨天", "前天", "搜索", "取消", "确定",
-        "返回", "关闭", "刷新", "更多", "复制链接", "用浏览器打开", "在浏览器中打开"
+        "返回", "关闭", "刷新", "更多", "复制链接", "用浏览器打开", "在浏览器中打开",
+        "预约成功通知", "服务通知", "微信团队", "文件传输助手", "订阅号消息", "消息", "通知"
     }
     # 状态与统计词黑名单 (包含即排除)
     sub_exclude = [
         "篇原创", "朋友关注", "朋友看过", "个内容", "篇内容", "条内容", "相关搜索", "余下",
-        "微信公众平台", "公众号", "小程序", "大家都在搜"
+        "微信公众平台", "公众号", "小程序", "大家都在搜", "预约成功", "服务通知", "微信团队"
     ]
 
     def _is_valid_title(txt: str) -> bool:
         t = txt.strip()
-        if len(t) < 2:
+        if len(t) < 3:
             return False
         if t in exact_exclude:
             return False
@@ -289,11 +290,11 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
             return False
         # 排除典型搜索联想问答句式 (如 "xx是什么平台", "xx怎么贴现")
         if (t.endswith("?") or t.endswith("？") or any(q in t for q in ["是什么", "怎么", "如何"])) and len(t) < 16:
-            if not any(k in t for k in ["发布", "通知", "服务", "发展", "应用", "年", "月", "日"]):
+            if not any(k in t for k in ["发布", "通知", "服务", "发展", "应用", "年", "月", "日", "毕业", "典礼", "学院"]):
                 return False
         # 纯日期与时间过滤 (如 "08/18", "14:48", "2026-08-31")
         if (any(t.endswith(d) for d in ["日", "月", "年"]) or "/" in t or ":" in t) and len(t) <= 10:
-            if not any(ch in t for ch in ["涨", "第", "大会", "峰会", "链", "融", "通", "数", "重磅", "万向"]):
+            if not any(ch in t for ch in ["涨", "第", "大会", "峰会", "链", "融", "通", "数", "重磅", "万向", "高金", "毕业"]):
                 return False
         return True
 
@@ -315,33 +316,48 @@ def find_article_cards(hwnd: Optional[int] = None) -> List[Dict[str, Any]]:
             if it["top"] > tab_bottom and (any(it["text"].endswith(d) for d in ["日", "月", "年"]) or any(w in it["text"] for w in ["昨天", "前天"]))
         ]
 
-    for anchor in anchors:
-        anchor_top = anchor["top"]
-        title_candidates = []
-        for it in items:
-            if it == anchor:
-                continue
-            if it["top"] >= tab_bottom and it["bottom"] <= anchor_top + 15:
-                dist = anchor_top - it["bottom"]
-                if -5 <= dist <= 140:
-                    txt = it["text"].strip()
-                    if _is_valid_title(txt):
-                        title_candidates.append((dist, it))
+    anchors.sort(key=lambda a: a["top"])
 
-        if title_candidates:
-            # 优先选择包含中文的候选词，并按距离锚点由近到远排序 (距离最近的才是紧挨着的主标题)
-            title_candidates.sort(
-                key=lambda item_dist: (
-                    not any("\u4e00" <= ch <= "\u9fff" for ch in item_dist[1]["text"]),
-                    item_dist[0],
-                )
-            )
-            best_item = title_candidates[0][1]
-            title_text = best_item["text"]
-            click_x, click_y = best_item["cx"], best_item["cy"]
-        else:
-            title_text = f"微信文章_{anchor['top']}"
-            click_x, click_y = anchor["cx"], anchor["top"] - 40
+    import re
+
+    for i, anchor in enumerate(anchors):
+        anchor_top = anchor["top"]
+        prev_bottom = anchors[i - 1]["bottom"] if i > 0 else tab_bottom
+
+        # 候选行：必须位于上一卡片底部与当前锚点之间，且水平左对齐（排除右侧作者缩略图）
+        title_candidates = [
+            it for it in items
+            if not any(w in it["text"] for w in ["阅读", "赞", "在看", "分享", "次阅读"])
+            and it["top"] >= prev_bottom - 5
+            and it["bottom"] <= anchor_top + 15
+            and abs(it["left"] - anchor["left"]) < 85
+        ]
+
+        if not title_candidates:
+            continue
+
+        title_candidates.sort(key=lambda x: x["top"])
+
+        # 过滤纯日期行 (如 "7月3日")
+        clean_lines = []
+        for l in title_candidates:
+            t = l["text"].strip()
+            if re.match(r"^\d{1,2}月\d{1,2}日$", t) or t in ["今天", "昨天", "前天"]:
+                continue
+            clean_lines.append(l)
+
+        if not clean_lines:
+            clean_lines = title_candidates
+
+        title_text = "".join(l["text"].strip() for l in clean_lines)
+        title_text = re.sub(r"^\d{1,2}月\d{1,2}日", "", title_text).strip()
+
+        if not _is_valid_title(title_text):
+            continue
+
+        # 计算合并标题块的几何中心
+        click_x = int((min(l["left"] for l in clean_lines) + max(l["right"] for l in clean_lines)) / 2)
+        click_y = int((min(l["top"] for l in clean_lines) + max(l["bottom"] for l in clean_lines)) / 2)
 
         if not _is_in_existing_band(click_y, threshold=35):
             seen_y_bands.append(click_y)
