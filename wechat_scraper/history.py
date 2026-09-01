@@ -82,3 +82,56 @@ def update_history_and_archives(
         flp.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
     return history, added_count
+
+
+def enrich_history_records(
+    history_file: str | Path = DEFAULT_HISTORY_FILE,
+    max_workers: int = 8,
+) -> int:
+    """自动为历史记录中缺失正文、Markdown和配图的文章补全完整内容。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from .article_fetcher import fetch_article_details
+
+    history = load_history(history_file)
+    if not history:
+        return 0
+
+    to_enrich_indices = [
+        i for i, r in enumerate(history)
+        if not r.get("content_html") or len(r.get("content_html", "")) < 100
+    ]
+
+    if not to_enrich_indices:
+        return 0
+
+    logger.info("检测到历史库有 %d 篇文章未包含图文正文，正在并发补全...", len(to_enrich_indices))
+
+    def _fetch(idx: int) -> Tuple[int, Dict[str, Any]]:
+        rec = history[idx]
+        url = rec.get("url", "").strip()
+        if url.startswith("http"):
+            try:
+                details = fetch_article_details(url)
+                return idx, details
+            except Exception as e:
+                logger.debug("补全文章内容失败 (%s): %s", url, e)
+        return idx, {}
+
+    updated = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for idx, details in executor.map(_fetch, to_enrich_indices):
+            if details:
+                if details.get("title") and (not history[idx].get("title") or "微信文章_" in history[idx]["title"]):
+                    history[idx]["title"] = details["title"]
+                if details.get("cover_url"):
+                    history[idx]["cover_url"] = details["cover_url"]
+                if details.get("content_html"):
+                    history[idx]["content_html"] = details["content_html"]
+                if details.get("content_markdown"):
+                    history[idx]["content_markdown"] = details["content_markdown"]
+                updated += 1
+
+    hp = Path(history_file)
+    hp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("已成功为历史库补全 %d 篇图文全文！", updated)
+    return updated
